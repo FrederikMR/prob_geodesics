@@ -1,7 +1,7 @@
 import torch.nn as nn
 import torch
 import math
-from unet import Unet
+from mnist_diffusion.unet import Unet
 from tqdm import tqdm
 
 class MNISTDiffusion(nn.Module):

@@ -6,8 +6,8 @@ from torchvision.utils import save_image
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
-from model import MNISTDiffusion
-from utils import ExponentialMovingAverage
+from mnist_diffusion.model import MNISTDiffusion
+from mnist_diffusion.utils import ExponentialMovingAverage
 import os
 import math
 import argparse

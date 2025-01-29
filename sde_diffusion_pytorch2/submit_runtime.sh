@@ -1,33 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Thu Aug 15 17:22:08 2024
-
-@author: fmry
-"""
-
-#%% Modules
-
-import numpy as np
-
-import os
-
-import time
-
-#%% Submit jobs
-
-def submit_job():
-    
-    os.system("bsub < submit_runtime.sh")
-    
-    return
-
-#%% Generate jobs
-
-def generate_job():
-
-    with open ('submit_runtime.sh', 'w') as rsh:
-        rsh.write(f'''\
     #! /bin/bash
     #BSUB -q gpuv100
     #BSUB -J mnist_score
@@ -47,11 +17,4 @@ def generate_job():
     module swap python3/3.10.12
     
     python3 train.py
-    ''')
     
-    return
-
-if __name__ == '__main__':
-    
-    generate_job()
-    submit_job()

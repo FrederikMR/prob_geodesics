@@ -10,3 +10,5 @@ Created on Tue Jan 28 03:24:00 2025
 
 from .prob_georce import ProbGEORCE, ProbEuclideanGEORCE
 from .pytorch_optimization import TorchOptimization, TorchEuclideanOptimization
+from .prob_sgeorce import ProbSGEORCE, ProbEuclideanSGEORCE
+from .prob_adageorce import ProbAdaGEORCE, ProbEuclideanAdaGEORCE

@@ -21,11 +21,9 @@ from abc import ABC
 from torch_geometry.riemannian.manifolds import RiemannianManifold
 from torch_geometry.line_search import Backtracking
 
-from .utils import GeoCurve
-
 #%% Gradient Descent Estimation of Geodesics
 
-class ProbGEORCE(ABC):
+class ProbAdaGEORCE(ABC):
     def __init__(self,
                  M:RiemannianManifold,
                  score_fun:Callable,
@@ -34,17 +32,24 @@ class ProbGEORCE(ABC):
                  T:int=100,
                  tol:float=1e-4,
                  max_iter:int=1000,
-                 line_search_params:Dict = {'rho': 0.5},
+                 lr_rate:float=0.1,
+                 beta1:float=0.5,
+                 beta2:float=0.5,
+                 eps:float=1e-8,
                  )->None:
         
         self.M = M
         self.score_fun = score_fun
         
+        self.lr_rate = lr_rate
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.eps = eps
+        
         self.lam = lam
         self.T = T
         self.tol = tol
         self.max_iter = max_iter
-        self.line_search_params = line_search_params
         
         if init_fun is None:
             self.init_fun = lambda z0, zT, T: (zT-z0)*torch.linspace(0.0,
@@ -202,13 +207,7 @@ class ProbGEORCE(ABC):
                  zT:Tensor,
                  step:str="while",
                  )->Tensor:
-        
-        self.line_search = Backtracking(obj_fun=self.reg_energy,
-                                        update_fun=self.update_xt,
-                                        grad_fun = lambda z,*args: self.Dregenergy(z,*args).reshape(-1),
-                                        **self.line_search_params,
-                                        )
-        
+
         self.z0 = z0.detach()
         self.zT = zT.detach()
         self.diff = zT-z0
@@ -258,7 +257,22 @@ class ProbGEORCE(ABC):
 
 #%% Probabilistic GEORCE for Euclidean Background Metric
 
-class ProbEuclideanGEORCE(ABC):
+class GeoCurve(torch.nn.Module):
+    def __init__(self, 
+                 zt:Tensor,
+                 )->None:
+        super(GeoCurve, self).__init__()
+        
+        self.zt = torch.nn.Parameter(zt, requires_grad=True)
+        
+        return
+    
+    def forward(self, 
+                )->Tensor:
+        
+        return self.zt
+
+class ProbEuclideanAdaGEORCE(ABC):
     def __init__(self,
                  score_fun:Callable,
                  init_fun:Callable[[Tensor, Tensor, int], Tensor]=None,
@@ -266,16 +280,23 @@ class ProbEuclideanGEORCE(ABC):
                  T:int=100,
                  tol:float=1e-4,
                  max_iter:int=1000,
-                 line_search_params:Dict = {'rho': 0.5},
+                 lr_rate:float=0.1,
+                 beta1:float=0.5,
+                 beta2:float=0.5,
+                 eps:float=1e-8,
                  )->None:
 
         self.score_fun = score_fun
+        
+        self.lr_rate = lr_rate
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.eps = eps
         
         self.lam = lam
         self.T = T
         self.tol = tol
         self.max_iter = max_iter
-        self.line_search_params = line_search_params
         
         if init_fun is None:
             self.init_fun = lambda z0, zT, T: (zT-z0)*torch.linspace(0.0,
@@ -317,13 +338,6 @@ class ProbEuclideanGEORCE(ABC):
         
         return energy+self.lam_norm*score_norm2
     
-    def Dregenergy(self,
-                   zt:Tensor,
-                   *args,
-                   )->Tensor:
-        
-        return grad(self.reg_energy)(zt,*args).detach()
-    
     def Dregenergy_fast(self,
                         ut:Tensor,
                         gt:Tensor,
@@ -340,14 +354,17 @@ class ProbEuclideanGEORCE(ABC):
         
         return self.lam_norm*score_norm2
     
-    def gt(self,
-           model:GeoCurve,
+    def sgt(self,
+           zt:Tensor,
            )->Tensor:
         
-        zt = model.forward()
+        with torch.no_grad():
+            self.model.zt = torch.nn.Parameter(zt)
+        
+        zt = self.model.forward()
         loss = self.inner_product(zt)
         loss.backward()
-        gt = model.zt.grad
+        gt = self.model.zt.grad
         
         #grad_fun = grad(self.inner_product)
         #gt = torch.stack([grad_fun(z).detach() for z in zt])
@@ -373,7 +390,32 @@ class ProbEuclideanGEORCE(ABC):
         g_sum = torch.sum(g_cumsum, dim=0)/self.T
         
         return self.diff/self.T+0.5*(g_sum-g_cumsum)
+    
+    @torch.no_grad()
+    def adaptive_default(self,
+                         sgt_k1:Tensor,
+                         sgt_k2:Tensor,
+                         rg_k1:Tensor,
+                         rg_k2:Tensor,
+                         idx:int,
+                         )->Tuple:
 
+        sgt_k2 = (1.-self.beta1)*sgt_k2+self.beta1*sgt_k1
+        rg_k2 = (1.-self.beta2)*rg_k2+self.beta2*rg_k1
+        
+        beta1 = self.beta1**(idx+2)
+        beta2 = self.beta2**(idx+2)
+
+        sgt_hat = sgt_k2/(1.-beta1)
+        vt = rg_k2/(1.-beta2)
+        
+        lr = self.lr_rate/(torch.sqrt(1+vt)+self.eps)
+        
+        kappa = torch.min(torch.Tensor([lr, 1.0])).item()
+        
+        return sgt_k2, sgt_hat, rg_k2, beta1, beta2, kappa, idx
+
+    @torch.no_grad()
     def cond_fun(self, 
                  grad_norm:Tensor,
                  idx:int,
@@ -381,26 +423,47 @@ class ProbEuclideanGEORCE(ABC):
 
         return (grad_norm>self.tol) & (idx < self.max_iter)
     
+    @torch.no_grad()
     def georce_step(self,
-                   model:GeoCurve,
-                   ut:Tensor,
-                   gt:Tensor,
-                   grad_norm:Tensor,
-                   idx:int,
-                   )->Tensor:
-
-        ut_hat = self.update_ut(gt)
-        tau = self.line_search(model.zt, ut_hat, ut)
-
-        ut = tau*ut_hat+(1.-tau)*ut
-        with torch.no_grad():
-            model.zt = torch.nn.Parameter(self.z0+torch.cumsum(ut[:-1], dim=0))
-        print(self.reg_energy(model.zt).item())
+                    zt:Tensor,
+                    ut:Tensor,
+                    sgt:Tensor,
+                    kappa:float,
+                    )->Tuple:
         
-        gt = self.gt(model)#jnp.einsum('tj,tjid,ti->td', un[1:], self.M.DG(xn[1:-1]), un[1:])
-        grad_norm = torch.linalg.norm(self.Dregenergy_fast(ut, gt)).item()
+        ut_hat = self.update_ut(sgt)
+        zt_hat = self.z0+torch.cumsum(ut_hat[:-1], dim=0)
         
-        return model, ut, gt, grad_norm, idx+1
+        return zt+kappa*(zt_hat-zt), ut+kappa*(ut_hat-ut)
+    
+    def adaptive_step(self,
+                      zt:Tensor,
+                      ut:Tensor,
+                      sgt_k1:Tensor, 
+                      sgt_hat:Tensor,
+                      rg_k1:Tensor,
+                      grad_norm:Tensor,
+                      kappa:float,
+                      idx:int,
+                      )->Tensor:
+        
+        zt, ut = self.georce_step(zt,
+                                  ut,
+                                  sgt_hat,
+                                  kappa,
+                                  )
+        sgt_k2 = self.sgt(zt)#jnp.einsum('tj,tjid,ti->td', un[1:], self.M.DG(xn[1:-1]), un[1:])
+        rg_k2 = torch.sum(sgt_k2**2)
+        
+        sgt_k2, sgt_hat, rg_k2, beta1, beta2, kappa, idx = self.adaptive_default(sgt_k1, 
+                                                                                 sgt_k2, 
+                                                                                 rg_k1, 
+                                                                                 rg_k2, 
+                                                                                 idx,
+                                                                                 )
+        grad_norm = torch.linalg.norm(self.Dregenergy_fast(ut, sgt_hat)).item()
+        
+        return zt, ut, sgt_k2, sgt_hat, rg_k2, grad_norm, kappa, idx+1
     
     def __call__(self, 
                  z0:Tensor,
@@ -408,44 +471,53 @@ class ProbEuclideanGEORCE(ABC):
                  step:str="while",
                  )->Tensor:
         
-        self.line_search = Backtracking(obj_fun=self.reg_energy,
-                                        update_fun=self.update_xt,
-                                        grad_fun = lambda z,*args: self.Dregenergy(z,*args).reshape(-1),
-                                        **self.line_search_params,
-                                        )
-        
         self.z0 = z0.detach()
         self.zT = zT.detach()
         self.diff = zT-z0
         self.dim = len(z0)
         
         zt = self.init_fun(z0,zT,self.T)
-        total = torch.vstack((self.z0, zt, self.zT))
-        ut = total[1:]-total[:-1]
-        model = GeoCurve(zt)
-        #ut = torch.ones((self.T, self.dim), dtype=z0.dtype, requires_grad=False)*self.diff/self.T
+        ut = torch.ones((self.T, self.dim), dtype=z0.dtype, requires_grad=False)*self.diff/self.T
+        self.model = GeoCurve(zt)
 
         energy_init = self.energy(zt).item()
         score_norm2_init = self.score_norm2(zt).item()
         self.lam_norm = self.lam*energy_init/score_norm2_init
         print(self.reg_energy(zt).item())
-        gt = self.gt(model)#jnp.einsum('tj,tjid,ti->td', un[1:], self.M.DG(xn[1:-1]), un[1:])
-        grad_norm = torch.linalg.norm(self.Dregenergy_fast(ut, gt)).item()
+        sgt = self.sgt(zt)#jnp.einsum('tj,tjid,ti->td', un[1:], self.M.DG(xn[1:-1]), un[1:])
+        rg = torch.sum(sgt**2)
+        grad_norm = torch.linalg.norm(self.Dregenergy_fast(ut, sgt)).item()
         if step == "while":
             idx = 0
             print(idx)
             while self.cond_fun(grad_norm, idx):
-                model, ut, gt, grad_norm, idx = self.georce_step(model, ut, gt, grad_norm, idx)
+                zt, ut, sgt, sgt_hat, rg, grad_norm, kappa, idx = self.adaptive_step(zt, 
+                                                                                     ut, 
+                                                                                     sgt, 
+                                                                                     sgt, 
+                                                                                     rg, 
+                                                                                     grad_norm, 
+                                                                                     self.lr_rate, 
+                                                                                     idx,
+                                                                                     )
+                print(self.reg_energy(zt).item())
                 print(idx)
         elif step == "for":
-            for idx in range(self.max_iter):
-                model, ut, gt, grad_norm, idx = self.georce_step(model, ut, gt, grad_norm, idx)
+            for _ in range(self.max_iter):
+                zt, ut, sgt, sgt_hat, rg, grad_norm, kappa, idx = self.adaptive_step(zt, 
+                                                                                     ut, 
+                                                                                     sgt,
+                                                                                     sgt,
+                                                                                     rg,
+                                                                                     grad_norm, 
+                                                                                     self.lr_rate, 
+                                                                                     idx,
+                                                                                     )
         else:
             raise ValueError(f"step argument should be either for or while. Passed argument is {step}")
             
-        reg_energy = self.reg_energy(model.zt).item()
-        
-        zt = torch.vstack((z0, model.zt, zT)).detach()
+        reg_energy = self.reg_energy(zt).item()
+        zt = torch.vstack((z0, zt, zT)).detach()
             
         return zt, reg_energy, grad_norm, idx
         

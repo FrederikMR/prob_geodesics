@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.layers import *
+from .layers import *
 
 """
 From 'https://huggingface.co/blog/annotated-diffusion'.

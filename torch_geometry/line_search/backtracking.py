@@ -161,7 +161,5 @@ class Backtracking(ABC):
         alpha, idx = self.alpha, 0
         while self.cond_fun(alpha, idx, *args):
             alpha, idx = self.update_alpha(alpha, idx)
-            
-        print(idx)
 
         return alpha

@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from src.sde_base import SDEBase
+from .sde_base import SDEBase
 
 
 
